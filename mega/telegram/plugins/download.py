@@ -1,17 +1,22 @@
-import re
 import os
-from pyrogram import filters, emoji
+import re
+import tldextract
+from pyrogram import emoji, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
-from mega.telegram import MegaDLBot
-from mega.helpers.media_info import MediaInfo
-from mega.helpers.downloader import Downloader
-from mega.database.users import MegaUsers
+from .. import filters
 from mega.database.files import MegaFiles
+from mega.database.users import MegaUsers
+from mega.helpers.downloader import Downloader
+from mega.helpers.media_info import MediaInfo
+from mega.helpers.screens import Screens
+from mega.helpers.ytdl import YTdl
 
 
-@MegaDLBot.on_message(filters.private & filters.text, group=0)
-async def new_message_dl_handler(c: MegaDLBot, m: Message):
+@Client.on_message(filters.private & filters.text, group=0)
+async def new_message_dl_handler(c: Client, m: Message):
     await MegaUsers().insert_user(m.from_user.id)
+
+    me = await c.get_me()
 
     regex = re.compile(
         r'^(?:http|ftp)s?://'  # http:// or https://
@@ -28,7 +33,7 @@ async def new_message_dl_handler(c: MegaDLBot, m: Message):
         else:
             url_details = await MegaFiles().get_file_by_url(m.text)
             files = [
-                f"<a href='http://t.me/megadlbot?start=plf-{file['file_id']}'>{file['file_name']} - {file['file_type']}</a>"
+                f"<a href='http://t.me/{me.username}?start=plf-{file['file_id']}'>{file['file_name']} - {file['file_type']}</a>"
                 for file in url_details
             ]
             files_msg_formatted = '/n'.join(files)
@@ -50,7 +55,7 @@ async def url_process(m: Message):
         await m.reply_text(
             f"I do not know the details of the file to download the file! {emoji.MAN_RAISING_HAND_DARK_SKIN_TONE}"
         )
-    elif header_info is not None:
+    elif header_info is not None and (tldextract.extract(m.text)).domain != "youtube":
         file_size = header_info.get("Content-Length") if "Content-Length" in header_info else None
         if file_size is not None and int(file_size) > 2147483648:
             await m.reply_text(
@@ -68,18 +73,45 @@ async def url_process(m: Message):
             if file_type_split.lower() == "video":
                 inline_buttons.append([
                     InlineKeyboardButton(text=f"{emoji.LIGHT_BULB} Media Info",
-                                         callback_data=f"info_{m.chat.id}_{m.message_id}")
+                                         callback_data=f"info_{m.chat.id}_{m.message_id}"),
+                    InlineKeyboardButton(text=f"{emoji.FRAMED_PICTURE} Screens",
+                                         callback_data=f"screens_{m.chat.id}_{m.message_id}")
                 ])
             await m.reply_text(
                 text="What would you like to do with this file?",
                 reply_markup=InlineKeyboardMarkup(inline_buttons)
             )
 
+    elif (tldextract.extract(m.text)).domain == "youtube":
+        inline_buttons = [
+            [
+                InlineKeyboardButton(text=f"{emoji.LOUDSPEAKER} Extract Audio",
+                                     callback_data=f"ytaudio_{m.chat.id}_{m.message_id}"),
+            ]
+        ]
+        await m.reply_text(
+            text="What would you like to do with this file?",
+            reply_markup=InlineKeyboardMarkup(inline_buttons)
+        )
 
-@MegaDLBot.on_callback_query(filters.regex("^download.*"), group=0)
-async def callback_download_handler(c: MegaDLBot, cb: CallbackQuery):
-    cb_chat = int(str(cb.data).split("_")[1]) if len(str(cb.data).split("_")) > 1 else None
-    cb_message_id = int(str(cb.data).split("_")[2]) if len(str(cb.data).split("_")) > 2 else None
+
+@Client.on_callback_query(filters.callback_query("ytaudio"), group=0)
+async def callback_ytaudio_handler(c: Client, cb: CallbackQuery):
+    params = cb.payload.split('_')
+    cb_chat = int(params[0]) if len(params) > 0 else None
+    cb_message_id = int(params[1]) if len(params) > 1 else None
+
+    cb_message = await c.get_messages(cb_chat, cb_message_id) if cb_message_id is not None else None
+
+    await cb.answer()
+    await YTdl().extract_audio(cb_message)
+
+
+@Client.on_callback_query(filters.callback_query("download"), group=0)
+async def callback_download_handler(c: Client, cb: CallbackQuery):
+    params = cb.payload.split('_')
+    cb_chat = int(params[0]) if len(params) > 0 else None
+    cb_message_id = int(params[1]) if len(params) > 1 else None
 
     cb_message = await c.get_messages(cb_chat, cb_message_id) if cb_message_id is not None else None
 
@@ -92,10 +124,24 @@ async def callback_download_handler(c: MegaDLBot, cb: CallbackQuery):
     await Downloader().download_file(cb_message.text, ack_message, None)
 
 
-@MegaDLBot.on_callback_query(filters.regex("^rename.*"), group=1)
-async def callback_rename_handler(c: MegaDLBot, cb: CallbackQuery):
+@Client.on_callback_query(filters.callback_query("screens"), group=0)
+async def callback_screens_handler(c: Client, cb: CallbackQuery):
+    params = cb.payload.split('_')
+    cb_chat = int(params[0]) if len(params) > 0 else None
+    cb_message_id = int(params[1]) if len(params) > 1 else None
+
+    cb_message = await c.get_messages(cb_chat, cb_message_id) if cb_message_id is not None else None
+    await Screens().cap_screens(cb_message)
+    # i think that should do... lets check?
+
+
+@Client.on_callback_query(filters.callback_query("rename"), group=1)
+async def callback_rename_handler(c: Client, cb: CallbackQuery):
     await cb.answer()
-    cb_message_id = int(str(cb.data).split("_")[2]) if len(str(cb.data).split("_")) > 2 else None
+
+    params = cb.payload.split('_')
+    cb_message_id = int(params[1]) if len(params) > 1 else None
+
     await cb.message.reply_text(
         f"RENAME_{cb_message_id}:\n"
         f"Send me the new name of the file as a reply to this message.",
@@ -103,10 +149,11 @@ async def callback_rename_handler(c: MegaDLBot, cb: CallbackQuery):
     )
 
 
-@MegaDLBot.on_callback_query(filters.regex("^info.*"), group=2)
-async def callback_info_handler(c: MegaDLBot, cb: CallbackQuery):
-    cb_chat = int(str(cb.data).split("_")[1]) if len(str(cb.data).split("_")) > 1 else None
-    cb_message_id = int(str(cb.data).split("_")[2]) if len(str(cb.data).split("_")) > 2 else None
+@Client.on_callback_query(filters.callback_query("info"), group=2)
+async def callback_info_handler(c: Client, cb: CallbackQuery):
+    params = cb.payload.split('_')
+    cb_chat = int(params[0]) if len(params) > 0 else None
+    cb_message_id = int(params[1]) if len(params) > 1 else None
 
     await cb.answer()
     cb_message = await c.get_messages(cb_chat, cb_message_id) if cb_message_id is not None else None
@@ -123,8 +170,8 @@ async def callback_info_handler(c: MegaDLBot, cb: CallbackQuery):
                 os.remove(m_info)
 
 
-@MegaDLBot.on_message(filters.reply & filters.private, group=1)
-async def reply_message_handler(c: MegaDLBot, m: Message):
+@Client.on_message(filters.reply & filters.private, group=1)
+async def reply_message_handler(c: Client, m: Message):
     func_message_obj = str(m.reply_to_message.text).splitlines()[0].split("_")
     if len(func_message_obj) > 1:
         func = func_message_obj[0]
